@@ -4,7 +4,13 @@
 // zyklisch mit den Gold-Codes aller 24 GPS-Satelliten und gibt aus, welche
 // Satelliten senden, welches Bit sie senden und wo die Chipsequenz beginnt.
 //
-//   ./satellite_decoder <summensignal.txt>
+// Aufruf:  ./satellite_decoder <summensignal.txt>
+//
+// Ablauf:
+//   1. Summensignal aus Textdatei einlesen        (loadSignal)
+//   2. Gold-Code fuer jeden Satelliten erzeugen   (generateGoldCode)
+//   3. Signal mit jedem Gold-Code kreuzkorrelieren und Peaks erkennen (decode)
+//   4. Ergebnis zeilenweise ausgeben              (main)
 
 #include <algorithm>
 #include <array>
@@ -22,7 +28,7 @@ namespace
 {
     constexpr int CHIP_COUNT = 1023;     // Chips pro Gold-Code (2^10 - 1)
     constexpr int SATELLITE_MAX = 24;    // Anzahl GPS-Satelliten
-    constexpr double PEAK_Z_SCORE = 5.0; // Schwellwert fuer Peak-Erkennung
+    constexpr double PEAK_Z_SCORE = 5.0; // Treffer: Z-Wert des Peaks >= 5.0
 
     // Tap-Paare (Register a, b) pro Satellit – aus der Tabelle in Abb. 9 des Skripts.
     constexpr std::array<std::pair<int, int>, SATELLITE_MAX> SAT_TAPS{{
@@ -52,49 +58,69 @@ namespace
         {4, 6},
     }};
 
-    // 10-stufiges Schieberegister (LFSR). Registerposition k (1-basiert) = Bit k-1,
-    // das Feedbackbit landet in Bit 0. Startbelegung "1111111111".
+    // 10-stufiges Schieberegister (LFSR). Registerposition k (1-basiert)
+    // steht an Bit k-1, das Feedbackbit landet in Bit 0.
+    // Startbelegung: "1111111111".
     struct Lfsr
     {
-        unsigned reg = 0x3FF;
+        unsigned registerState = 0x3FF;
 
-        unsigned bit(int pos) const { return (reg >> (pos - 1)) & 1u; }
-        void shift(unsigned feedback) { reg = ((reg << 1) & 0x3FFu) | (feedback & 1u); }
+        // Wert an Registerposition pos (1..10) auslesen.
+        unsigned readBit(int pos) const
+        {
+            return (registerState >> (pos - 1)) & 1u;
+        }
+
+        // Register eine Stelle weiterschieben und Feedbackbit vorne eintragen.
+        void advance(unsigned feedback)
+        {
+            registerState = ((registerState << 1) & 0x3FFu) | (feedback & 1u);
+        }
     };
 
     // Gold-Code eines Satelliten als +1/-1-Chipfolge.
-    // G1 hat das Feedback-Polynom 1 + X^3 + X^10, G2 das Polynom
-    // 1 + X^2 + X^3 + X^6 + X^8 + X^9 + X^10.
-    std::array<int, CHIP_COUNT> goldCode(int sat)
+    // G1 hat das Feedback-Polynom 1 + X^3 + X^10,
+    // G2 hat das Polynom 1 + X^2 + X^3 + X^6 + X^8 + X^9 + X^10.
+    std::array<int, CHIP_COUNT> generateGoldCode(int satelliteId)
     {
-        const auto [tapA, tapB] = SAT_TAPS[sat - 1];
-        Lfsr g1;
-        Lfsr g2;
+        // Tap-Paare (Abgriffe) fuer diesen Satelliten aus der Tabelle.
+        const auto [g2FirstTap, g2SecondTap] = SAT_TAPS[satelliteId - 1];
+        Lfsr generatorG1;
+        Lfsr generatorG2;
 
-        std::array<int, CHIP_COUNT> chips{};
-        for (int i = 0; i < CHIP_COUNT; ++i)
+        std::array<int, CHIP_COUNT> chipSequence{};
+        for (int chipIndex = 0; chipIndex < CHIP_COUNT; ++chipIndex)
         {
-            chips[i] = (g1.bit(10) ^ g2.bit(tapA) ^ g2.bit(tapB)) ? +1 : -1;
-            g1.shift(g1.bit(3) ^ g1.bit(10));
-            g2.shift(g2.bit(2) ^ g2.bit(3) ^ g2.bit(6) ^ g2.bit(8) ^ g2.bit(9) ^ g2.bit(10));
+            // Chip = XOR aus G1-Ausgang (Position 10) und den beiden G2-Abgriffen.
+            const int xorResult = generatorG1.readBit(10) ^
+                                  generatorG2.readBit(g2FirstTap) ^
+                                  generatorG2.readBit(g2SecondTap);
+            chipSequence[chipIndex] = xorResult ? +1 : -1;
+
+            // Naechsten Chip berechnen: Feedback der Register einschieben.
+            generatorG1.advance(generatorG1.readBit(3) ^ generatorG1.readBit(10));
+            generatorG2.advance(generatorG2.readBit(2) ^ generatorG2.readBit(3) ^
+                                generatorG2.readBit(6) ^ generatorG2.readBit(8) ^
+                                generatorG2.readBit(9) ^ generatorG2.readBit(10));
         }
-        return chips;
+        return chipSequence;
     }
 
     // Summensignal aus einer Textdatei lesen (durch Leerzeichen getrennte Zahlen).
     std::vector<int> loadSignal(const std::string &filename)
     {
-        std::ifstream in(filename);
-        if (!in)
-            throw std::runtime_error("Datei kann nicht geoeffnet werden");
+        std::ifstream inputFile(filename);
+        if (!inputFile)
+            throw std::runtime_error("Datei kann nicht geoeffnet werden: " + filename);
 
-        std::vector<int> values;
-        int v;
-        while (in >> v)
-            values.push_back(v);
-        if (values.empty())
-            throw std::runtime_error("Datei enthaelt keine Werte");
-        return values;
+        std::vector<int> chipValues;
+        int value;
+        while (inputFile >> value)
+            chipValues.push_back(value);
+
+        if (chipValues.empty())
+            throw std::runtime_error("Datei enthaelt keine Werte: " + filename);
+        return chipValues;
     }
 
     // Ein erkanntes Satellitensignal.
@@ -109,38 +135,60 @@ namespace
     // dann pruefen, ob sich der staerkste Korrelationswert deutlich vom Rauschen
     // abhebt. Vorzeichen des Peaks = gesendetes Bit (Bit 1: Sequenz unveraendert,
     // Bit 0: invertiert), Position des Maximums = delta.
-    std::vector<Detection> decode(const std::vector<int> &signal)
+    std::vector<Detection> decode(const std::vector<int> &sumSignal)
     {
         std::vector<Detection> detections;
 
-        for (int sat = 1; sat <= SATELLITE_MAX; ++sat)
+        for (int satelliteId = 1; satelliteId <= SATELLITE_MAX; ++satelliteId)
         {
-            const std::array<int, CHIP_COUNT> code = goldCode(sat);
+            const std::array<int, CHIP_COUNT> satelliteCode = generateGoldCode(satelliteId);
 
-            std::array<int, CHIP_COUNT> corr{};
+            // Kreuzkorrelation: Code gegen jede moegliche Startposition (delta)
+            // im Summensignal verschieben. Das Modulo macht die Suche zyklisch,
+            // damit auch mitten im Signal beginnende Sequenzen gefunden werden.
+            std::array<int, CHIP_COUNT> correlationProfile{};
             for (int delta = 0; delta < CHIP_COUNT; ++delta)
             {
-                int sum = 0;
-                for (int i = 0; i < CHIP_COUNT; ++i)
-                    sum += code[i] * signal[(delta + i) % signal.size()];
-                corr[delta] = sum;
+                int correlationTotal = 0;
+                for (int chipIndex = 0; chipIndex < CHIP_COUNT; ++chipIndex)
+                    correlationTotal += satelliteCode[chipIndex] *
+                                        sumSignal[(delta + chipIndex) % sumSignal.size()];
+                correlationProfile[delta] = correlationTotal;
             }
 
-            // Mittelwert und Standardabweichung der Korrelationsreihe (Rauschen).
-            const double mean = std::accumulate(corr.begin(), corr.end(), 0.0) / corr.size();
-            double sqSum = 0.0;
-            for (int v : corr)
-                sqSum += (v - mean) * (v - mean);
-            const double stddev = std::sqrt(sqSum / corr.size());
+            // Mittelwert und Standardabweichung der Korrelationsreihe (= Rauschen).
+            const double correlationMean =
+                std::accumulate(correlationProfile.begin(), correlationProfile.end(), 0.0) /
+                correlationProfile.size();
 
-            // Staerkste Verschiebung = Ort, an dem die Chipsequenz beginnt.
-            const int best = static_cast<int>(
-                std::max_element(corr.begin(), corr.end(), [](int a, int b)
-                                 { return std::abs(a) < std::abs(b); }) -
-                corr.begin());
+            double squaredErrorSum = 0.0;
+            for (int correlationValue : correlationProfile)
+                squaredErrorSum += (correlationValue - correlationMean) *
+                                   (correlationValue - correlationMean);
+            const double correlationStdDev =
+                std::sqrt(squaredErrorSum / correlationProfile.size());
 
-            // Echter Treffer: Peak liegt >= 5 Sigma ueber dem Rauschen.
-            if (stddev > 0.0 && (std::abs(corr[best]) - mean) / stddev >= PEAK_Z_SCORE) detections.push_back({sat, corr[best] > 0 ? 1 : 0, best});
+            // Staerkste Verschiebung = Ort, an dem die Chipsequenz beginnt (delta).
+            const int bestDelta = static_cast<int>(
+                std::max_element(correlationProfile.begin(), correlationProfile.end(),
+                                 [](int valueA, int valueB)
+                                 { return std::abs(valueA) < std::abs(valueB); }) -
+                correlationProfile.begin());
+
+            // Echter Treffer: Peak liegt mindestens 5 Sigma ueber dem Rauschen.
+            // Vorzeichen des Peaks: positiv = Bit 1 (Sequenz unveraendert),
+            //                       negativ = Bit 0 (Sequenz invertiert).
+            const double peakZScore =
+                correlationStdDev > 0.0
+                    ? (std::abs(correlationProfile[bestDelta]) - correlationMean) /
+                          correlationStdDev
+                    : 0.0;
+
+            if (peakZScore >= PEAK_Z_SCORE)
+            {
+                const int transmittedBit = correlationProfile[bestDelta] > 0 ? 1 : 0;
+                detections.push_back({satelliteId, transmittedBit, bestDelta});
+            }
         }
         return detections;
     }
@@ -157,23 +205,28 @@ int main(int argc, char *argv[])
 
     try
     {
-        const std::vector<int> signal = loadSignal(argv[1]);
-        if (signal.size() < CHIP_COUNT)
+        const std::vector<int> sumSignal = loadSignal(argv[1]);
+        if (sumSignal.size() < CHIP_COUNT)
         {
-            std::cerr << "Fehler: Summensignal muss mindestens " << CHIP_COUNT << " Chips enthalten (Datei hat " << signal.size() << ").\n";
+            std::cerr << "Fehler: Summensignal muss mindestens " << CHIP_COUNT
+                      << " Chips enthalten (Datei hat " << sumSignal.size() << ").\n";
             return EXIT_FAILURE;
         }
 
-        const std::vector<Detection> detections = decode(signal);
-        for (const Detection &d : detections)
-            std::cout << "Satellite " << d.satelliteId << " has sent bit " << d.bit << " (delta = " << d.delta << ")\n";
+        const std::vector<Detection> detections = decode(sumSignal);
+        for (const Detection &detection : detections)
+        {
+            std::cout << "Satellite " << detection.satelliteId
+                      << " has sent bit " << detection.bit
+                      << " (delta = " << detection.delta << ")\n";
+        }
 
         if (detections.empty())
             std::cerr << "Kein Satellitensignal erkannt.\n";
     }
-    catch (const std::exception &e)
+    catch (const std::exception &error)
     {
-        std::cerr << "Fehler: " << e.what() << '\n';
+        std::cerr << "Fehler: " << error.what() << '\n';
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;
