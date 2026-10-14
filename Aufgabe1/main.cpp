@@ -184,6 +184,16 @@ namespace
                           correlationStdDev
                     : 0.0;
 
+#ifdef DEBUG
+            // Zwischenergebnis fuer jeden Satelliten ausgeben (nur im Debug-Build).
+            std::cerr << "[Debug] Satellit " << satelliteId
+                      << ": Peak = " << correlationProfile[bestDelta]
+                      << " (delta = " << bestDelta << ")"
+                      << ", Mittelwert = " << correlationMean
+                      << ", StdDev = " << correlationStdDev
+                      << ", Z-Wert = " << peakZScore << '\n';
+#endif
+
             if (peakZScore >= PEAK_Z_SCORE)
             {
                 const int transmittedBit = correlationProfile[bestDelta] > 0 ? 1 : 0;
@@ -206,6 +216,10 @@ int main(int argc, char *argv[])
     try
     {
         const std::vector<int> sumSignal = loadSignal(argv[1]);
+#ifdef DEBUG
+        std::cerr << "[Debug] " << sumSignal.size() << " Chips aus "
+                  << argv[1] << " geladen.\n";
+#endif
         if (sumSignal.size() < CHIP_COUNT)
         {
             std::cerr << "Fehler: Summensignal muss mindestens " << CHIP_COUNT

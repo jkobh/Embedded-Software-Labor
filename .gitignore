@@ -1,5 +1,6 @@
 # Build-Artefakte
 satellite_decoder
+satellite_decoder_debug
 build/
 *.o
 *.exe

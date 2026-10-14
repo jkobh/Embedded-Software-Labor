@@ -22,6 +22,18 @@ make run        # Decoder auf gps_sequence_7.txt laufen lassen
 make clean      # Binaries entfernen
 ```
 
+### Debug-Ausgabe
+
+Mit `make debug` wird eine Debug-Version gebaut (`-DDEBUG`, mit `-g`), die
+zusaetzlich zu den Ergebnissen auch Zwischenwerte pro Satellit auf
+`stderr` ausgibt: Peak-Wert und delta, Mittelwert, Standardabweichung und
+den Z-Score der Korrelation. Das hilft beim Nachvollziehen, warum ein
+Satellit erkannt wird (Z-Score >= 5) oder nicht.
+
+```bash
+make debug
+```
+
 Der Dateiname kann auch direkt als Kommandozeilenparameter uebergeben werden
 (Schritt 1 der Aufgabe):
 
