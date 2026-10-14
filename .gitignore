@@ -1,0 +1,15 @@
+# Build-Artefakte
+satellite_decoder
+build/
+*.o
+*.exe
+
+# Compiler-/Editor-Caches
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Temporäre Dateien
+*.tmp
+*~
